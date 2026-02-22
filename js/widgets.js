@@ -3571,6 +3571,83 @@ const WIDGETS = {
     `
   },
 
+  // ─────────────────────────────────────────────
+  // INTEGRATIONS
+  // ─────────────────────────────────────────────
+
+  'crabwalk-monitor': {
+    name: 'CrabWalk Monitor',
+    icon: '🦀',
+    category: 'integration',
+    description: 'Real-time OpenClaw agent activity monitor. Button opens full-screen CrabWalk, or embed inline.',
+    defaultWidth: 200,
+    defaultHeight: 120,
+    hasApiKey: false,
+    properties: {
+      title: 'CrabWalk Monitor',
+      mode: 'button',
+      monitorUrl: '/crabwalk/monitor'
+    },
+    preview: `<div style="text-align:center;padding:12px;">
+      <div style="font-size:24px;">🦀</div>
+      <div style="font-size:11px;color:#8b949e;">Agent Monitor</div>
+    </div>`,
+    generateHtml: (props) => {
+      if (props.mode === 'embed') {
+        return `
+      <div class="dash-card" id="widget-${props.id}" style="height:100%;position:relative;">
+        <div class="dash-card-head">
+          <span class="dash-card-title">🦀 ${props.title || 'CrabWalk Monitor'}</span>
+          <button id="${props.id}-expand" style="background:none;border:none;cursor:pointer;font-size:14px;" title="Full screen">⛶</button>
+        </div>
+        <iframe id="${props.id}-frame" src="${props.monitorUrl || '/crabwalk/monitor'}"
+          style="width:100%;height:calc(100% - 32px);border:none;border-radius:0 0 8px 8px;background:#0a0a0f;"
+          loading="lazy"></iframe>
+      </div>`;
+      }
+      return `
+      <div class="dash-card" id="widget-${props.id}" style="height:100%;">
+        <div class="dash-card-head">
+          <span class="dash-card-title">🦀 ${props.title || 'CrabWalk Monitor'}</span>
+        </div>
+        <div class="dash-card-body" style="display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;cursor:pointer;"
+             id="${props.id}-launcher">
+          <span style="font-size:32px;">🦀</span>
+          <div class="kpi-label" id="${props.id}-status">Click to open</div>
+        </div>
+      </div>`;
+    },
+    generateJs: (props) => {
+      if (props.mode === 'embed') {
+        return `
+      // CrabWalk Monitor (embed): ${props.id}
+      document.getElementById('${props.id}-expand')?.addEventListener('click', () => {
+        const frame = document.getElementById('${props.id}-frame');
+        if (frame.requestFullscreen) frame.requestFullscreen();
+        else if (frame.webkitRequestFullscreen) frame.webkitRequestFullscreen();
+      });`;
+      }
+      return `
+      // CrabWalk Monitor (button): ${props.id}
+      (function() {
+        const launcher = document.getElementById('${props.id}-launcher');
+        const status = document.getElementById('${props.id}-status');
+        // Check gateway connection status
+        fetch('/api/trpc/openclaw.status')
+          .then(r => r.json())
+          .then(d => {
+            const connected = d?.result?.data?.json?.connected;
+            status.textContent = connected ? 'Connected' : 'Disconnected';
+            status.style.color = connected ? '#4ade80' : '#f87171';
+          })
+          .catch(() => { status.textContent = 'Unavailable'; });
+        launcher?.addEventListener('click', () => {
+          window.open('${props.monitorUrl || '/crabwalk/monitor'}', '_blank');
+        });
+      })();`;
+    }
+  },
+
 };
 
 // Export for use in builder

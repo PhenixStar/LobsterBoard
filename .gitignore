@@ -9,3 +9,8 @@ node_modules/
 # Security - never commit
 auth.json
 secrets.json
+
+# CrabWalk build artifacts
+crabwalk/node_modules/
+crabwalk/.output/
+crabwalk/.vinxi/

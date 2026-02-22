@@ -65,10 +65,14 @@
     "prebuild": "rm -rf dist",
     "start": "node server.cjs",
     "dev": "node server.cjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "build:adapter": "node crabwalk/scripts/build-gateway-adapter.mjs",
+    "build:crabwalk": "cd crabwalk && pnpm build && node scripts/generate-spa-html.mjs",
+    "build:all": "npm run build:adapter && npm run build:crabwalk"
   },
   "devDependencies": {
     "@rollup/plugin-terser": "^0.4.4",
+    "esbuild": "^0.27.3",
     "rollup": "^4.9.6",
     "rollup-plugin-copy": "^3.5.0"
   },
@@ -76,6 +80,7 @@
     "node": ">=16.0.0 <23.0.0"
   },
   "dependencies": {
-    "systeminformation": "^5.30.7"
+    "systeminformation": "^5.30.7",
+    "ws": "^8.19.0"
   }
 }

@@ -12,8 +12,19 @@ const path = require('path');
 const os = require('os');
 const si = require('systeminformation');
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 7880;
 const HOST = process.env.HOST || '127.0.0.1';
+
+// ─────────────────────────────────────────────
+// CrabWalk Gateway Adapter (tRPC + OpenClaw)
+// ─────────────────────────────────────────────
+let gatewayAdapter = null;
+try {
+  gatewayAdapter = require('./crabwalk-gateway-adapter.cjs');
+  console.log('🦀 CrabWalk gateway adapter loaded');
+} catch (e) {
+  console.log('🦀 CrabWalk gateway adapter not found — run: npm run build:adapter');
+}
 
 // ─────────────────────────────────────────────
 // Pages System — auto-discovery and mounting
@@ -1878,6 +1889,56 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── CrabWalk tRPC handler ──
+  if (gatewayAdapter && pathname.startsWith('/api/trpc')) {
+    try {
+      await gatewayAdapter.handleTrpc(req, res);
+    } catch (e) {
+      if (!res.writableEnded) sendError(res, e.message);
+    }
+    return;
+  }
+
+  // ── Gateway config endpoints ──
+  if (req.method === 'GET' && pathname === '/api/gateway/config') {
+    const status = gatewayAdapter ? gatewayAdapter.getGatewayStatus() : { url: '', connected: false, authState: 'unknown' };
+    const secrets = getSecrets();
+    const gw = secrets['__gateway__'] || {};
+    sendJson(res, 200, {
+      url: gw.gatewayUrl || status.url || 'ws://127.0.0.1:18789',
+      hasToken: !!(gw.apiToken || process.env.CLAWDBOT_API_TOKEN),
+      connected: status.connected,
+      authState: status.authState,
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/gateway/config') {
+    if (isPublicMode()) { sendJson(res, 403, { error: 'Forbidden in public mode' }); return; }
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { gatewayUrl, apiToken } = JSON.parse(body);
+        const secrets = getSecrets();
+        if (!secrets['__gateway__']) secrets['__gateway__'] = {};
+        if (gatewayUrl) secrets['__gateway__'].gatewayUrl = gatewayUrl;
+        if (apiToken && apiToken !== '••••••••') secrets['__gateway__'].apiToken = apiToken;
+        writeJsonFile(SECRETS_FILE, secrets);
+        // Trigger gateway reconnect
+        if (gatewayAdapter) {
+          gatewayAdapter.reconnectGateway({
+            gatewayUrl: secrets['__gateway__'].gatewayUrl,
+            apiToken: secrets['__gateway__'].apiToken,
+          });
+        }
+        const status = gatewayAdapter ? gatewayAdapter.getGatewayStatus() : { connected: false };
+        sendJson(res, 200, { status: 'ok', connected: status.connected });
+      } catch (e) { sendError(res, e.message, 400); }
+    });
+    return;
+  }
+
   // ── Security: PIN auth endpoints ──
   if (req.method === 'GET' && pathname === '/api/auth/status') {
     const auth = getAuth();
@@ -2005,7 +2066,8 @@ const server = http.createServer(async (req, res) => {
     const editPaths = ['/config'];
     const isEditApi = (req.method === 'POST' && editPaths.includes(pathname)) ||
                       (req.method === 'POST' && pathname.startsWith('/api/templates/')) ||
-                      (req.method === 'DELETE' && pathname.startsWith('/api/templates/'));
+                      (req.method === 'DELETE' && pathname.startsWith('/api/templates/')) ||
+                      (req.method === 'POST' && pathname === '/api/gateway/config');
     if (isEditApi) {
       sendJson(res, 403, { error: 'Dashboard is in public mode. Editing is disabled.' });
       return;
@@ -3053,6 +3115,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── CrabWalk static serving (/crabwalk/*) ──
+  const CRABWALK_PUBLIC = path.join(__dirname, 'crabwalk', '.output', 'public');
+  if (pathname.startsWith('/crabwalk/') || pathname === '/crabwalk') {
+    const subPath = pathname === '/crabwalk' ? '/index.html'
+                  : pathname.slice('/crabwalk'.length) || '/index.html';
+    const cwFilePath = path.join(CRABWALK_PUBLIC, subPath);
+    const cwResolved = path.resolve(cwFilePath);
+    if (!cwResolved.startsWith(path.resolve(CRABWALK_PUBLIC))) {
+      sendResponse(res, 403, 'text/plain', 'Forbidden'); return;
+    }
+    fs.readFile(cwFilePath, (err, data) => {
+      if (err) {
+        // SPA fallback: serve index.html for unknown sub-paths
+        fs.readFile(path.join(CRABWALK_PUBLIC, 'index.html'), (e2, html) => {
+          if (e2) { sendResponse(res, 404, 'text/plain', 'CrabWalk not built. Run: npm run build:crabwalk'); return; }
+          sendResponse(res, 200, 'text/html', html);
+        });
+        return;
+      }
+      const ext = path.extname(cwFilePath).toLowerCase();
+      const ct = MIME_TYPES[ext] || 'application/octet-stream';
+      sendResponse(res, 200, ct, data);
+    });
+    return;
+  }
+
   // Serve static files
   let filePath = path.join(__dirname, pathname);
   if (pathname === '/') {
@@ -3097,4 +3185,15 @@ ${authStatus}
 
    Press Ctrl+C to stop
 `);
+  // Initialize gateway from saved config
+  if (gatewayAdapter) {
+    try {
+      const secrets = getSecrets();
+      const gw = secrets['__gateway__'] || {};
+      if (gw.gatewayUrl || gw.apiToken) {
+        gatewayAdapter.reconnectGateway({ gatewayUrl: gw.gatewayUrl, apiToken: gw.apiToken });
+        console.log(`🦀 Gateway connecting to ${gw.gatewayUrl || 'default'}`);
+      }
+    } catch (_) {}
+  }
 });
