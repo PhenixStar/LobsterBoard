@@ -7553,7 +7553,7 @@ function createConnectParams(token, device, password) {
     permissions: {},
     locale: "en-US",
     userAgent: "crabwalk-monitor/0.1.0",
-    auth: password ? { password } : token ? { token } : void 0,
+    auth: token ? { token } : password ? { password } : void 0,
     device
   };
 }

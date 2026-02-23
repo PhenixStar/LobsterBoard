@@ -6,6 +6,11 @@
  * - Handle loading and saving of config.json for the builder
  */
 
+// Allow self-signed certs for gateway WSS connections
+if (!process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -448,6 +453,31 @@ function extractSecrets(config) {
   }
   writeJsonFile(SECRETS_FILE, secrets);
   return config;
+}
+
+/** Sync gateway auth from auth-status widget secrets to __gateway__ and reconnect */
+function syncGatewayAuth(config) {
+  if (!config.widgets) return;
+  const authWidget = config.widgets.find(w => w.type === 'auth-status');
+  if (!authWidget) return;
+  const secrets = getSecrets();
+  const widgetSecrets = secrets[authWidget.id];
+  if (!widgetSecrets || !widgetSecrets.apiKey) return;
+  const authMode = authWidget.properties?.authMode || 'password';
+  if (!secrets['__gateway__']) secrets['__gateway__'] = {};
+  if (authMode === 'token') {
+    secrets['__gateway__'].apiToken = widgetSecrets.apiKey;
+    delete secrets['__gateway__'].password;
+  } else {
+    secrets['__gateway__'].password = widgetSecrets.apiKey;
+    delete secrets['__gateway__'].apiToken;
+  }
+  writeJsonFile(SECRETS_FILE, secrets);
+  // Trigger gateway reconnect with new credentials
+  if (gatewayAdapter) {
+    const gw = secrets['__gateway__'];
+    gatewayAdapter.reconnectGateway({ gatewayUrl: gw.gatewayUrl, apiToken: gw.apiToken, password: gw.password });
+  }
 }
 
 // Scan templates directory for meta.json files
@@ -1864,6 +1894,8 @@ const server = http.createServer(async (req, res) => {
       try {
         let config = JSON.parse(body);
         config = extractSecrets(config);
+        // Sync gateway auth from auth-status widget
+        syncGatewayAuth(config);
         fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8', (err) => {
           if (err) {
             sendError(res, `Failed to write config file: ${err.message}`);
@@ -3084,18 +3116,23 @@ const server = http.createServer(async (req, res) => {
     if (!cwResolved.startsWith(path.resolve(CRABWALK_PUBLIC))) {
       sendResponse(res, 403, 'text/plain', 'Forbidden'); return;
     }
-    fs.readFile(cwFilePath, (err, data) => {
-      if (err) {
-        // SPA fallback: serve index.html for unknown sub-paths
+    // Try exact file, then directory index.html, then SPA fallback
+    const tryFile = (filePath, cb) => {
+      fs.readFile(filePath, (err, data) => {
+        if (err) cb(null); else cb(data, filePath);
+      });
+    };
+    tryFile(cwFilePath, (data, p) => {
+      if (data) { sendResponse(res, 200, MIME_TYPES[path.extname(p).toLowerCase()] || 'application/octet-stream', data); return; }
+      // Try as directory with index.html
+      tryFile(path.join(cwFilePath, 'index.html'), (data2, p2) => {
+        if (data2) { sendResponse(res, 200, 'text/html', data2); return; }
+        // SPA fallback: serve root index.html
         fs.readFile(path.join(CRABWALK_PUBLIC, 'index.html'), (e2, html) => {
           if (e2) { sendResponse(res, 404, 'text/plain', 'CrabWalk not built. Run: npm run build:crabwalk'); return; }
           sendResponse(res, 200, 'text/html', html);
         });
-        return;
-      }
-      const ext = path.extname(cwFilePath).toLowerCase();
-      const ct = MIME_TYPES[ext] || 'application/octet-stream';
-      sendResponse(res, 200, ct, data);
+      });
     });
     return;
   }

@@ -1083,6 +1083,7 @@ function initProperties() {
   document.getElementById('prop-api-key').addEventListener('input', onPropertyChange);
   document.getElementById('prop-api-key-value').addEventListener('input', onPropertyChange);
   document.getElementById('prop-endpoint').addEventListener('input', onPropertyChange);
+  if (document.getElementById('prop-authmode')) document.getElementById('prop-authmode').addEventListener('change', onPropertyChange);
   if (document.getElementById('prop-directorypath')) {
     document.getElementById('prop-directorypath').addEventListener('input', onPropertyChange);
     document.getElementById('btn-browse-dir').addEventListener('click', () => openDirBrowser());
@@ -1165,6 +1166,7 @@ function showProperties(widget) {
 
   // Hide all optional groups first
   document.getElementById('prop-api-group').style.display = 'none';
+  if (document.getElementById('prop-authmode-group')) document.getElementById('prop-authmode-group').style.display = 'none';
   document.getElementById('prop-endpoint-group').style.display = 'none';
   if (document.getElementById('prop-directorypath-group')) document.getElementById('prop-directorypath-group').style.display = 'none';
   document.getElementById('prop-location-group').style.display = 'none';
@@ -1369,6 +1371,15 @@ function showProperties(widget) {
     if (noteEl) {
       noteEl.textContent = template.properties?.apiKeyNote || '';
       noteEl.style.display = template.properties?.apiKeyNote ? 'block' : 'none';
+    }
+  }
+
+  // Show auth mode dropdown for gateway auth widgets
+  if (widget.properties.authMode !== undefined) {
+    const authModeGroup = document.getElementById('prop-authmode-group');
+    if (authModeGroup) {
+      authModeGroup.style.display = 'block';
+      document.getElementById('prop-authmode').value = widget.properties.authMode || 'password';
     }
   }
 
@@ -1773,6 +1784,9 @@ function onPropertyChange(e) {
       break;
     case 'prop-api-key-value':
       widget.properties.apiKey = e.target.value;
+      break;
+    case 'prop-authmode':
+      widget.properties.authMode = e.target.value;
       break;
     case 'prop-endpoint':
       widget.properties.endpoint = e.target.value;

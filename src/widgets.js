@@ -116,20 +116,21 @@ export const WIDGETS = {
     name: 'Auth Status',
     icon: '🔐',
     category: 'small',
-    description: 'Shows if OpenClaw is using Anthropic Max subscription (green) or API key fallback (yellow).',
+    description: 'Shows OpenClaw gateway auth status. Configure token or password auth in widget settings.',
     defaultWidth: 180,
     defaultHeight: 100,
     hasApiKey: true,
-    apiKeyName: 'OPENCLAW_API',
+    apiKeyName: 'GATEWAY_AUTH',
     properties: {
       title: 'Auth Type',
-      endpoint: '/api/status',
+      authMode: 'password',
+      apiKeyNote: 'Auth mode: set API Key field to your token or password. Choose mode below.',
       refreshInterval: 30
     },
     preview: `<div style="text-align:center;padding:8px;">
       <div style="width:10px;height:10px;background:#3fb950;border-radius:50%;margin:0 auto 4px;"></div>
-      <div style="font-size:13px;">OAuth</div>
-      <div style="font-size:11px;color:#8b949e;">Auth</div>
+      <div style="font-size:13px;">Auth</div>
+      <div style="font-size:11px;color:#8b949e;">Status</div>
     </div>`,
     generateHtml: (props) => `
       <div class="dash-card" id="widget-${props.id}" style="height:100%;">
@@ -143,17 +144,27 @@ export const WIDGETS = {
       </div>`,
     generateJs: (props) => `
       // Auth Status Widget: ${props.id}
+      // Auth mode: ${props.authMode || 'password'}, credential saved in secrets
       async function update_${props.id.replace(/-/g, '_')}() {
         try {
-          const res = await fetch('${props.endpoint || '/api/status'}');
-          const json = await res.json();
-          const data = json.data || json;
+          const gwRes = await fetch('/api/trpc/openclaw.authStatus').then(r => r.json()).catch(() => null);
           const dot = document.getElementById('${props.id}-dot');
           const val = document.getElementById('${props.id}-value');
-          val.textContent = data.authMode === 'oauth' ? 'Subscription' : 'API';
-          dot.className = 'kpi-indicator ' + (data.authMode === 'oauth' ? 'green' : 'yellow');
+          const gwAuth = gwRes?.result?.data?.json?.authState;
+          if (gwAuth === 'authorized') {
+            val.textContent = '${(props.authMode || 'password') === 'password' ? 'Password' : 'Token'}';
+            dot.className = 'kpi-indicator green';
+          } else if (gwAuth === 'unpaired' || gwAuth === 'unauthorized') {
+            val.textContent = gwAuth;
+            dot.className = 'kpi-indicator red';
+          } else if (gwAuth) {
+            val.textContent = gwAuth;
+            dot.className = 'kpi-indicator yellow';
+          } else {
+            val.textContent = 'Offline';
+            dot.className = 'kpi-indicator red';
+          }
         } catch (e) {
-          console.error('Auth status widget error:', e);
           document.getElementById('${props.id}-value').textContent = '—';
         }
       }
@@ -503,7 +514,7 @@ export const WIDGETS = {
           <span class="dash-card-title">🦀 ${props.title || 'CrabWalk Monitor'}</span>
           <button id="${props.id}-expand" style="background:none;border:none;cursor:pointer;font-size:14px;" title="Full screen">⛶</button>
         </div>
-        <iframe id="${props.id}-frame" src="${props.monitorUrl || '/crabwalk/monitor'}"
+        <iframe id="${props.id}-frame" src="${(props.monitorUrl || '/crabwalk/monitor')}?embed=1"
           style="width:100%;height:calc(100% - 32px);border:none;border-radius:0 0 8px 8px;background:#0a0a0f;"
           loading="lazy"></iframe>
       </div>`;

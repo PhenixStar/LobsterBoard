@@ -287,7 +287,7 @@ export function createConnectParams(
     permissions: {},
     locale: 'en-US',
     userAgent: 'crabwalk-monitor/0.1.0',
-    auth: password ? { password } : token ? { token } : undefined,
+    auth: token ? { token } : password ? { password } : undefined,
     device,
   }
 }

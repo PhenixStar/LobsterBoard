@@ -70,7 +70,16 @@ interface PairingState {
   message?: string
 }
 
+function useEmbedMode() {
+  const [embed, setEmbed] = useState(false)
+  useEffect(() => {
+    setEmbed(new URLSearchParams(window.location.search).has('embed'))
+  }, [])
+  return embed
+}
+
 function MonitorPage() {
+  const embed = useEmbedMode()
   const [connected, setConnected] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [authState, setAuthState] = useState<AuthState>('unknown')
@@ -262,8 +271,8 @@ function MonitorPage() {
 
   return (
     <div className="h-screen flex flex-col bg-shell-950 text-white overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 bg-shell-900 relative">
+      {/* Header — hidden in embed mode */}
+      {!embed && <header className="flex items-center justify-between px-4 py-3 bg-shell-900 relative">
         {/* Gradient accent */}
         <div className="absolute inset-0 bg-linear-to-r from-crab-950/20 via-transparent to-transparent pointer-events-none" />
 
@@ -321,7 +330,7 @@ function MonitorPage() {
             </div>
           </div>
         </div>
-      </header>
+      </header>}
 
       {connected && !canPollSessions && (
         <div className="px-4 py-2 border-y border-neon-peach/30 bg-neon-peach/10">
@@ -359,8 +368,8 @@ function MonitorPage() {
         </div>
       </div>
 
-      {/* Mobile components */}
-      {isMobile && (
+      {/* Mobile components — hidden in embed mode */}
+      {isMobile && !embed && (
         <>
           <MobileMonitorToolbar
             onOpenDrawer={() => setSessionDrawerOpen(true)}
