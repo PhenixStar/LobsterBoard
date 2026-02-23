@@ -21,22 +21,24 @@ import type { IncomingMessage, ServerResponse } from 'http'
 let clientInstance: ClawdbotClient | null = null
 let currentUrl = process.env.CLAWDBOT_URL || 'ws://127.0.0.1:18789'
 let currentToken: string | undefined = process.env.CLAWDBOT_API_TOKEN
+let currentPassword: string | undefined = process.env.CLAWDBOT_PASSWORD
 
 function getClient(): ClawdbotClient {
   if (!clientInstance) {
-    clientInstance = new ClawdbotClient(currentUrl, currentToken)
+    clientInstance = new ClawdbotClient(currentUrl, currentToken, currentPassword)
   }
   return clientInstance
 }
 
-export function reconnectGateway(config: { gatewayUrl?: string; apiToken?: string }) {
+export function reconnectGateway(config: { gatewayUrl?: string; apiToken?: string; password?: string }) {
   if (clientInstance) {
     clientInstance.disconnect()
     clientInstance = null
   }
   if (config.gatewayUrl) currentUrl = config.gatewayUrl
   if (config.apiToken) currentToken = config.apiToken
-  clientInstance = new ClawdbotClient(currentUrl, currentToken)
+  if (config.password) currentPassword = config.password
+  clientInstance = new ClawdbotClient(currentUrl, currentToken, currentPassword)
   // Auto-connect (fire and forget)
   clientInstance.connect().catch(() => {})
 }

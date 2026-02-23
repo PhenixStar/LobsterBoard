@@ -48,7 +48,8 @@ export class ClawdbotClient {
 
   constructor(
     private url: string = DEFAULT_GATEWAY_URL,
-    private token?: string
+    private token?: string,
+    private password?: string
   ) {}
 
   get connected() {
@@ -155,7 +156,7 @@ export class ClawdbotClient {
       return
     }
 
-    let params = createConnectParams(this.token)
+    let params = createConnectParams(this.token, undefined, this.password)
     try {
       const device = buildSignedDevice({
         challenge,
@@ -165,7 +166,7 @@ export class ClawdbotClient {
         clientId: params.client.id,
         clientMode: params.client.mode,
       })
-      params = createConnectParams(this.token, device)
+      params = createConnectParams(this.token, device, this.password)
     } catch (error) {
       console.error('[openclaw] Failed to create signed device identity:', error)
     }

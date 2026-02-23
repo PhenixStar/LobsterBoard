@@ -1899,46 +1899,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Gateway config endpoints ──
-  if (req.method === 'GET' && pathname === '/api/gateway/config') {
-    const status = gatewayAdapter ? gatewayAdapter.getGatewayStatus() : { url: '', connected: false, authState: 'unknown' };
-    const secrets = getSecrets();
-    const gw = secrets['__gateway__'] || {};
-    sendJson(res, 200, {
-      url: gw.gatewayUrl || status.url || 'ws://127.0.0.1:18789',
-      hasToken: !!(gw.apiToken || process.env.CLAWDBOT_API_TOKEN),
-      connected: status.connected,
-      authState: status.authState,
-    });
-    return;
-  }
-
-  if (req.method === 'POST' && pathname === '/api/gateway/config') {
-    if (isPublicMode()) { sendJson(res, 403, { error: 'Forbidden in public mode' }); return; }
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const { gatewayUrl, apiToken } = JSON.parse(body);
-        const secrets = getSecrets();
-        if (!secrets['__gateway__']) secrets['__gateway__'] = {};
-        if (gatewayUrl) secrets['__gateway__'].gatewayUrl = gatewayUrl;
-        if (apiToken && apiToken !== '••••••••') secrets['__gateway__'].apiToken = apiToken;
-        writeJsonFile(SECRETS_FILE, secrets);
-        // Trigger gateway reconnect
-        if (gatewayAdapter) {
-          gatewayAdapter.reconnectGateway({
-            gatewayUrl: secrets['__gateway__'].gatewayUrl,
-            apiToken: secrets['__gateway__'].apiToken,
-          });
-        }
-        const status = gatewayAdapter ? gatewayAdapter.getGatewayStatus() : { connected: false };
-        sendJson(res, 200, { status: 'ok', connected: status.connected });
-      } catch (e) { sendError(res, e.message, 400); }
-    });
-    return;
-  }
-
   // ── Security: PIN auth endpoints ──
   if (req.method === 'GET' && pathname === '/api/auth/status') {
     const auth = getAuth();
@@ -2066,8 +2026,7 @@ const server = http.createServer(async (req, res) => {
     const editPaths = ['/config'];
     const isEditApi = (req.method === 'POST' && editPaths.includes(pathname)) ||
                       (req.method === 'POST' && pathname.startsWith('/api/templates/')) ||
-                      (req.method === 'DELETE' && pathname.startsWith('/api/templates/')) ||
-                      (req.method === 'POST' && pathname === '/api/gateway/config');
+                      (req.method === 'DELETE' && pathname.startsWith('/api/templates/'));
     if (isEditApi) {
       sendJson(res, 403, { error: 'Dashboard is in public mode. Editing is disabled.' });
       return;
@@ -3190,8 +3149,8 @@ ${authStatus}
     try {
       const secrets = getSecrets();
       const gw = secrets['__gateway__'] || {};
-      if (gw.gatewayUrl || gw.apiToken) {
-        gatewayAdapter.reconnectGateway({ gatewayUrl: gw.gatewayUrl, apiToken: gw.apiToken });
+      if (gw.gatewayUrl || gw.apiToken || gw.password) {
+        gatewayAdapter.reconnectGateway({ gatewayUrl: gw.gatewayUrl, apiToken: gw.apiToken, password: gw.password });
         console.log(`🦀 Gateway connecting to ${gw.gatewayUrl || 'default'}`);
       }
     } catch (_) {}

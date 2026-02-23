@@ -39,7 +39,7 @@ export interface ConnectParams {
   minProtocol: 3
   maxProtocol: 3
   client: ClientInfo
-  auth?: { token?: string }
+  auth?: { token?: string; password?: string }
   device?: ConnectDevice
 }
 
@@ -253,7 +253,8 @@ export function parseSessionKey(key: string): {
 
 export function createConnectParams(
   token?: string,
-  device?: ConnectDevice
+  device?: ConnectDevice,
+  password?: string
 ): ConnectParams & {
   role: string
   scopes: string[]
@@ -286,7 +287,7 @@ export function createConnectParams(
     permissions: {},
     locale: 'en-US',
     userAgent: 'crabwalk-monitor/0.1.0',
-    auth: token ? { token } : undefined,
+    auth: password ? { password } : token ? { token } : undefined,
     device,
   }
 }

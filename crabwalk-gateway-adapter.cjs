@@ -7530,7 +7530,7 @@ function parseSessionKey(key) {
   const recipient = hasType ? parts.slice(3).join(":") : parts.slice(3).join(":");
   return { agentId, platform, recipient, isGroup };
 }
-function createConnectParams(token, device) {
+function createConnectParams(token, device, password) {
   const platformMap = {
     win32: "windows",
     darwin: "macos",
@@ -7553,7 +7553,7 @@ function createConnectParams(token, device) {
     permissions: {},
     locale: "en-US",
     userAgent: "crabwalk-monitor/0.1.0",
-    auth: token ? { token } : void 0,
+    auth: password ? { password } : token ? { token } : void 0,
     device
   };
 }
@@ -7689,9 +7689,10 @@ function buildSignedDevice(params) {
 // crabwalk/src/integrations/openclaw/client.ts
 var DEFAULT_GATEWAY_URL = process.env.CLAWDBOT_URL || "ws://127.0.0.1:18789";
 var ClawdbotClient = class {
-  constructor(url = DEFAULT_GATEWAY_URL, token) {
+  constructor(url = DEFAULT_GATEWAY_URL, token, password) {
     this.url = url;
     this.token = token;
+    this.password = password;
   }
   ws = null;
   requestId = 0;
@@ -7794,7 +7795,7 @@ var ClawdbotClient = class {
     if (this.ws?.readyState !== import_ws.default.OPEN) {
       return;
     }
-    let params = createConnectParams(this.token);
+    let params = createConnectParams(this.token, void 0, this.password);
     try {
       const device = buildSignedDevice({
         challenge,
@@ -7804,7 +7805,7 @@ var ClawdbotClient = class {
         clientId: params.client.id,
         clientMode: params.client.mode
       });
-      params = createConnectParams(this.token, device);
+      params = createConnectParams(this.token, device, this.password);
     } catch (error) {
       console.error("[openclaw] Failed to create signed device identity:", error);
     }
@@ -15551,9 +15552,10 @@ var execsCollection = createCollection(
 var clientInstance = null;
 var currentUrl = process.env.CLAWDBOT_URL || "ws://127.0.0.1:18789";
 var currentToken = process.env.CLAWDBOT_API_TOKEN;
+var currentPassword = process.env.CLAWDBOT_PASSWORD;
 function getClient() {
   if (!clientInstance) {
-    clientInstance = new ClawdbotClient(currentUrl, currentToken);
+    clientInstance = new ClawdbotClient(currentUrl, currentToken, currentPassword);
   }
   return clientInstance;
 }
@@ -15564,7 +15566,8 @@ function reconnectGateway(config) {
   }
   if (config.gatewayUrl) currentUrl = config.gatewayUrl;
   if (config.apiToken) currentToken = config.apiToken;
-  clientInstance = new ClawdbotClient(currentUrl, currentToken);
+  if (config.password) currentPassword = config.password;
+  clientInstance = new ClawdbotClient(currentUrl, currentToken, currentPassword);
   clientInstance.connect().catch(() => {
   });
 }

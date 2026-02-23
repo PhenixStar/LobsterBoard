@@ -482,13 +482,13 @@ export const WIDGETS = {
     name: 'CrabWalk Monitor',
     icon: '🦀',
     category: 'integration',
-    description: 'Real-time OpenClaw agent activity monitor. Button opens full-screen CrabWalk, or embed inline.',
-    defaultWidth: 200,
-    defaultHeight: 120,
+    description: 'Real-time OpenClaw agent activity monitor embedded directly on the dashboard.',
+    defaultWidth: 600,
+    defaultHeight: 400,
     hasApiKey: false,
     properties: {
       title: 'CrabWalk Monitor',
-      mode: 'button',
+      mode: 'embed',
       monitorUrl: '/crabwalk/monitor'
     },
     preview: `<div style="text-align:center;padding:12px;">

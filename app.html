@@ -15,7 +15,6 @@
     <div class="header-left">
       <img src="lobsterboard-logo-final.png" alt="LobsterBoard" class="logo-img">
       <nav class="header-nav" id="header-nav">
-        <a href="/crabwalk/monitor" class="nav-link" id="nav-crabwalk">🦀 Monitor</a>
         <a href="changelog.html" class="nav-link">Changelog</a>
         <a href="https://github.com/curbob/LobsterBoard" target="_blank" class="nav-link">GitHub</a>
       </nav>
@@ -347,6 +346,17 @@
             <span class="widget-icon">₿</span>
             <span class="widget-name">Crypto Price</span>
             <span class="widget-verified" title="Tested & Verified">✓</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Integrations -->
+      <div class="widget-section">
+        <h4>🦀 Integrations</h4>
+        <div class="widget-list">
+          <div class="widget-item" draggable="true" data-widget="crabwalk-monitor">
+            <span class="widget-icon">🦀</span>
+            <span class="widget-name">CrabWalk Monitor</span>
           </div>
         </div>
       </div>
@@ -973,115 +983,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Gateway Config Modal -->
-  <div id="gateway-modal" class="pin-modal-overlay" style="display:none;">
-    <div class="pin-modal" style="max-width:420px;">
-      <h3>🦀 Gateway Settings</h3>
-      <p style="color:#8b949e;font-size:12px;margin:0 0 16px;">Configure the OpenClaw gateway connection for the CrabWalk monitor.</p>
-      <div class="security-option">
-        <label style="display:block;margin-bottom:4px;font-size:13px;"><strong>Gateway URL</strong></label>
-        <input type="text" id="gw-url" placeholder="ws://127.0.0.1:18789"
-          style="width:100%;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:13px;font-family:monospace;">
-        <p style="color:#8b949e;font-size:11px;margin:4px 0 0;">WebSocket URL of the OpenClaw gateway</p>
-      </div>
-      <div class="security-option" style="margin-top:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;"><strong>API Token</strong> <span style="color:#8b949e;font-weight:normal;">(optional)</span></label>
-        <input type="password" id="gw-token" placeholder="Enter API token"
-          style="width:100%;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#e6edf3;font-size:13px;font-family:monospace;">
-      </div>
-      <div id="gw-status" style="margin-top:12px;padding:8px 10px;background:#161b22;border-radius:6px;font-size:12px;font-family:monospace;color:#8b949e;display:none;"></div>
-      <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;">
-        <button class="btn btn-secondary" id="gw-test">Test</button>
-        <button class="btn btn-primary" id="gw-save">Save & Connect</button>
-        <button class="btn btn-secondary" id="gw-close">Close</button>
-      </div>
-    </div>
-  </div>
-  <script>
-  // Gateway config modal
-  (function() {
-    const modal = document.getElementById('gateway-modal');
-    const urlInput = document.getElementById('gw-url');
-    const tokenInput = document.getElementById('gw-token');
-    const statusEl = document.getElementById('gw-status');
-
-    // Open modal from Monitor nav link (right-click or long-press opens config)
-    document.getElementById('nav-crabwalk')?.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      openGatewayModal();
-    });
-
-    // Also add gear icon next to the Monitor link
-    const navLink = document.getElementById('nav-crabwalk');
-    if (navLink) {
-      const gear = document.createElement('span');
-      gear.textContent = ' ⚙';
-      gear.style.cssText = 'cursor:pointer;opacity:0.5;font-size:12px;';
-      gear.title = 'Gateway Settings';
-      gear.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openGatewayModal(); });
-      navLink.appendChild(gear);
-    }
-
-    async function openGatewayModal() {
-      statusEl.style.display = 'none';
-      try {
-        const res = await fetch('/api/gateway/config');
-        const cfg = await res.json();
-        urlInput.value = cfg.gatewayUrl || '';
-        tokenInput.value = cfg.apiToken || '';
-      } catch { /* use defaults */ }
-      modal.style.display = 'flex';
-    }
-
-    function showStatus(msg, color) {
-      statusEl.textContent = msg;
-      statusEl.style.color = color || '#8b949e';
-      statusEl.style.display = 'block';
-    }
-
-    document.getElementById('gw-test').addEventListener('click', async () => {
-      showStatus('Testing connection...', '#e6edf3');
-      try {
-        const res = await fetch('/api/trpc/openclaw.status');
-        const data = await res.json();
-        const connected = data?.result?.data?.json?.connected;
-        showStatus(connected ? '✓ Connected to gateway' : '✗ Not connected (gateway may be offline)', connected ? '#4ade80' : '#f87171');
-      } catch (e) {
-        showStatus('✗ Error: ' + e.message, '#f87171');
-      }
-    });
-
-    document.getElementById('gw-save').addEventListener('click', async () => {
-      showStatus('Saving...', '#e6edf3');
-      try {
-        const res = await fetch('/api/gateway/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ gatewayUrl: urlInput.value, apiToken: tokenInput.value })
-        });
-        const data = await res.json();
-        if (data.ok) {
-          showStatus('✓ Saved. Reconnecting...', '#4ade80');
-          setTimeout(async () => {
-            try {
-              const s = await fetch('/api/trpc/openclaw.status');
-              const d = await s.json();
-              showStatus(d?.result?.data?.json?.connected ? '✓ Connected!' : '⚠ Saved but not connected yet', d?.result?.data?.json?.connected ? '#4ade80' : '#f0ad4e');
-            } catch { showStatus('✓ Saved', '#4ade80'); }
-          }, 2000);
-        } else {
-          showStatus('✗ ' + (data.error || 'Save failed'), '#f87171');
-        }
-      } catch (e) {
-        showStatus('✗ Error: ' + e.message, '#f87171');
-      }
-    });
-
-    document.getElementById('gw-close').addEventListener('click', () => { modal.style.display = 'none'; });
-    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
-  })();
-  </script>
 
   <script src="js/templates.js"></script>
 </body>
