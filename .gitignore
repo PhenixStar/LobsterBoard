@@ -14,3 +14,6 @@ secrets.json
 crabwalk/node_modules/
 crabwalk/.output/
 crabwalk/.vinxi/
+
+# Claude Code local settings
+.claude/settings.local.json
