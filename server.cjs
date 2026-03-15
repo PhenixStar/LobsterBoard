@@ -16,6 +16,47 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const si = require('systeminformation');
+const crypto = require('crypto');
+
+// ─────────────────────────────────────────────
+// ECDH Crypto utilities for encrypted agent communication
+// ─────────────────────────────────────────────
+const ECDH_CURVE = 'prime256v1';
+const AES_ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+
+function generateEcdhKeyPair() {
+  const ecdh = crypto.createECDH(ECDH_CURVE);
+  ecdh.generateKeys();
+  return {
+    publicKey: ecdh.getPublicKey('base64'),
+    privateKey: ecdh.getPrivateKey('base64'),
+  };
+}
+
+function deriveSharedSecret(privateKeyBase64, theirPublicKeyBase64) {
+  const ecdh = crypto.createECDH(ECDH_CURVE);
+  ecdh.setPrivateKey(Buffer.from(privateKeyBase64, 'base64'));
+  const sharedPoint = ecdh.computeSecret(Buffer.from(theirPublicKeyBase64, 'base64'));
+  return crypto.createHash('sha256').update(sharedPoint).digest();
+}
+
+function decryptPayload(encryptedBase64, keyBuffer) {
+  const packed = Buffer.from(encryptedBase64, 'base64');
+  const iv = packed.subarray(0, IV_LENGTH);
+  const authTag = packed.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+  const ciphertext = packed.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+  
+  const decipher = crypto.createDecipheriv(AES_ALGORITHM, keyBuffer, iv, { authTagLength: AUTH_TAG_LENGTH });
+  decipher.setAuthTag(authTag);
+  
+  const decrypted = Buffer.concat([
+    decipher.update(ciphertext),
+    decipher.final(),
+  ]);
+  return JSON.parse(decrypted.toString('utf8'));
+}
 
 const PORT = process.env.PORT || 7880;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -34,68 +75,97 @@ try {
 // ─────────────────────────────────────────────
 // Pages System — auto-discovery and mounting
 // ─────────────────────────────────────────────
-const PAGES_DIR = path.join(__dirname, 'pages');
-const PAGES_JSON = path.join(__dirname, 'pages.json');
-const DATA_DIR = path.join(__dirname, 'data');
+// Load from both package pages AND user's working directory pages (user overrides package)
+const CWD = process.cwd();
+// When run via npx/bin, LOBSTERBOARD_PKG_DIR tells us where the package is
+const PKG_DIR = process.env.LOBSTERBOARD_PKG_DIR || __dirname;
+const USER_PAGES_DIR = path.join(CWD, 'pages');
+const PKG_PAGES_DIR = path.join(PKG_DIR, 'pages');
+const PAGES_DIRS = [PKG_PAGES_DIR]; // Package pages first
+if (CWD !== PKG_DIR && fs.existsSync(USER_PAGES_DIR)) {
+  PAGES_DIRS.push(USER_PAGES_DIR); // User pages override
+}
+// For backwards compat, PAGES_DIR points to first available (used for _shared)
+const PAGES_DIR = fs.existsSync(USER_PAGES_DIR) ? USER_PAGES_DIR : PKG_PAGES_DIR;
+const USER_PAGES_JSON = path.join(CWD, 'pages.json');
+const PKG_PAGES_JSON = path.join(__dirname, 'pages.json');
+const PAGES_JSON = fs.existsSync(USER_PAGES_JSON) ? USER_PAGES_JSON : PKG_PAGES_JSON;
+// Data always in working directory (user's data)
+const DATA_DIR = path.join(CWD, 'data');
 
 let loadedPages = []; // { id, title, icon, description, order, routes: { 'METHOD /path': handler } }
 
 function loadPages() {
   const pages = [];
+  const seenIds = new Set();
   let overrides = { pages: {} };
   try { overrides = JSON.parse(fs.readFileSync(PAGES_JSON, 'utf8')); } catch (_) {}
 
-  let dirs;
-  try { dirs = fs.readdirSync(PAGES_DIR); } catch (_) { return pages; }
+  // Scan all page directories (user pages loaded last to override package pages)
+  for (const pagesDir of PAGES_DIRS) {
+    let dirs;
+    try { dirs = fs.readdirSync(pagesDir); } catch (_) { continue; }
 
-  for (const dir of dirs) {
-    if (dir.startsWith('_')) continue;
-    const metaPath = path.join(PAGES_DIR, dir, 'page.json');
-    if (!fs.existsSync(metaPath)) continue;
+    for (const dir of dirs) {
+      if (dir.startsWith('_')) continue;
+      const metaPath = path.join(pagesDir, dir, 'page.json');
+      if (!fs.existsSync(metaPath)) continue;
 
-    let meta;
-    try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (_) { continue; }
+      let meta;
+      try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (_) { continue; }
 
-    const override = overrides.pages[meta.id] || {};
-    meta.enabled = override.enabled ?? meta.enabled ?? true;
-    meta.order = override.order ?? meta.order ?? 99;
+      const override = overrides.pages[meta.id] || {};
+      meta.enabled = override.enabled ?? meta.enabled ?? true;
+      meta.order = override.order ?? meta.order ?? 99;
 
-    if (!meta.enabled) continue;
+      if (!meta.enabled) continue;
 
-    // Ensure data dir
-    const dataDir = path.join(DATA_DIR, meta.id);
-    fs.mkdirSync(dataDir, { recursive: true });
-
-    // Load API routes if api.cjs (or api.js) exists
-    let apiPath = path.join(PAGES_DIR, dir, 'api.cjs');
-    if (!fs.existsSync(apiPath)) apiPath = path.join(PAGES_DIR, dir, 'api.js');
-    let routes = {};
-    if (fs.existsSync(apiPath)) {
-      try {
-        const ctx = {
-          dataDir,
-          readData: (filename) => JSON.parse(fs.readFileSync(path.join(dataDir, filename), 'utf8')),
-          writeData: (filename, obj) => {
-            fs.mkdirSync(dataDir, { recursive: true });
-            fs.writeFileSync(path.join(dataDir, filename), JSON.stringify(obj, null, 2));
-          }
-        };
-        const pageModule = require(apiPath)(ctx);
-        routes = pageModule.routes || {};
-      } catch (e) {
-        console.error(`Error loading page API for ${meta.id}:`, e.message);
+      // If we've seen this ID before (from package), remove it so user page wins
+      if (seenIds.has(meta.id)) {
+        const idx = pages.findIndex(p => p.id === meta.id);
+        if (idx !== -1) pages.splice(idx, 1);
       }
-    }
+      seenIds.add(meta.id);
 
-    pages.push({
-      id: meta.id,
-      title: meta.title,
-      icon: meta.icon,
-      description: meta.description,
-      order: meta.order,
-      nav: meta.nav !== false,
-      routes
-    });
+      // Store which directory this page came from
+      meta._pagesDir = pagesDir;
+
+      // Ensure data dir
+      const dataDir = path.join(DATA_DIR, meta.id);
+      fs.mkdirSync(dataDir, { recursive: true });
+
+      // Load API routes if api.cjs (or api.js) exists
+      let apiPath = path.join(pagesDir, dir, 'api.cjs');
+      if (!fs.existsSync(apiPath)) apiPath = path.join(pagesDir, dir, 'api.js');
+      let routes = {};
+      if (fs.existsSync(apiPath)) {
+        try {
+          const ctx = {
+            dataDir,
+            readData: (filename) => JSON.parse(fs.readFileSync(path.join(dataDir, filename), 'utf8')),
+            writeData: (filename, obj) => {
+              fs.mkdirSync(dataDir, { recursive: true });
+              fs.writeFileSync(path.join(dataDir, filename), JSON.stringify(obj, null, 2));
+            }
+          };
+          const pageModule = require(apiPath)(ctx);
+          routes = pageModule.routes || {};
+        } catch (e) {
+          console.error(`Error loading page API for ${meta.id}:`, e.message);
+        }
+      }
+
+      pages.push({
+        id: meta.id,
+        title: meta.title,
+        icon: meta.icon,
+        description: meta.description,
+        order: meta.order,
+        nav: meta.nav !== false,
+        _pagesDir: pagesDir,
+        routes
+      });
+    }
   }
 
   return pages.sort((a, b) => a.order - b.order);
@@ -148,11 +218,16 @@ function matchPageRoute(pages, method, pathname, parsedUrl) {
     }
     const page = pages.find(p => p.id === pageId);
     if (page) {
-      const subPath = pagesMatch[2] || '/';
-      if (subPath === '/' || subPath === '') {
-        return { type: 'static', filePath: path.join(PAGES_DIR, pageId, 'index.html') };
+      const subPath = pagesMatch[2] || '';
+      // Redirect /pages/id to /pages/id/ (trailing slash) for proper relative path resolution
+      if (!subPath) {
+        return { type: 'redirect', location: `/pages/${pageId}/` };
       }
-      return { type: 'static', filePath: path.join(PAGES_DIR, pageId, subPath.slice(1)) };
+      const pageDir = page._pagesDir || PAGES_DIR;
+      if (subPath === '/') {
+        return { type: 'static', filePath: path.join(pageDir, pageId, 'index.html') };
+      }
+      return { type: 'static', filePath: path.join(pageDir, pageId, subPath.slice(1)) };
     }
   }
 
@@ -309,14 +384,54 @@ const MIME_TYPES = {
   '.map': 'application/json' // For sourcemaps
 };
 
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const AUTH_FILE = path.join(__dirname, 'auth.json');
-const SECRETS_FILE = path.join(__dirname, 'secrets.json');
+// User config files — stored in working directory (survives npm updates)
+const CONFIG_FILE = path.join(CWD, 'config.json');
+const AUTH_FILE = path.join(CWD, 'auth.json');
+const SECRETS_FILE = path.join(CWD, 'secrets.json');
+
+// ─────────────────────────────────────────────
+// Migration: copy data from package dir to user dir (v0.6.2+)
+// ─────────────────────────────────────────────
+function migrateUserData() {
+  const filesToMigrate = ['config.json', 'auth.json', 'secrets.json', 'todos.json', 'notes.json'];
+  const dirsToMigrate = ['data'];
+  let migrated = [];
+
+  for (const file of filesToMigrate) {
+    const userPath = path.join(CWD, file);
+    const pkgPath = path.join(PKG_DIR, file);
+    if (!fs.existsSync(userPath) && fs.existsSync(pkgPath)) {
+      try {
+        fs.copyFileSync(pkgPath, userPath);
+        migrated.push(file);
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  for (const dir of dirsToMigrate) {
+    const userDir = path.join(CWD, dir);
+    const pkgDir = path.join(PKG_DIR, dir);
+    if (!fs.existsSync(userDir) && fs.existsSync(pkgDir)) {
+      try {
+        fs.cpSync(pkgDir, userDir, { recursive: true });
+        migrated.push(dir + '/');
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  if (migrated.length > 0) {
+    console.log(`📦 Migrated data to working directory: ${migrated.join(', ')}`);
+  }
+}
+
+// Run migration on startup
+if (CWD !== PKG_DIR) {
+  migrateUserData();
+}
 
 // ─────────────────────────────────────────────
 // Server-side Session Authentication
 // ─────────────────────────────────────────────
-const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || null;
 const SESSION_TTL_MS = (parseInt(process.env.SESSION_TTL_HOURS) || 24) * 60 * 60 * 1000;
@@ -1668,7 +1783,7 @@ const aiUsageCache = {
 const AI_CACHE_TTL_MS = 300000; // 5 minutes cache
 
 // Persistent file cache (survives restarts)
-const AI_CACHE_FILE = path.join(__dirname, 'data', 'ai-usage-cache.json');
+const AI_CACHE_FILE = path.join(CWD, 'data', 'ai-usage-cache.json');
 
 function loadPersistentCache() {
   try {
@@ -1855,6 +1970,276 @@ const server = http.createServer(async (req, res) => {
       'Access-Control-Allow-Headers': 'Content-Type'
     });
     res.end();
+    return;
+  }
+
+  // ─────────────────────────────────────────────
+  // Server Profiles API (for remote LobsterBoard Agent connections)
+  // ─────────────────────────────────────────────
+  const SERVERS_FILE = path.join(CWD, 'data', 'servers.json');
+  
+  function loadServers() {
+    try {
+      if (fs.existsSync(SERVERS_FILE)) {
+        return JSON.parse(fs.readFileSync(SERVERS_FILE, 'utf8'));
+      }
+    } catch (e) { /* ignore */ }
+    return [{ id: 'local', name: 'Local', type: 'local' }];
+  }
+  
+  function saveServers(servers) {
+    fs.mkdirSync(path.dirname(SERVERS_FILE), { recursive: true });
+    fs.writeFileSync(SERVERS_FILE, JSON.stringify(servers, null, 2));
+  }
+
+  // GET /api/servers - List all servers
+  if (req.method === 'GET' && pathname === '/api/servers') {
+    const servers = loadServers();
+    // Mask API keys and secrets for security
+    const masked = servers.map(s => ({
+      ...s,
+      apiKey: s.apiKey ? s.apiKey.slice(0, 10) + '...' : undefined,
+      sharedSecret: s.sharedSecret ? '🔐' : undefined, // Just indicate presence
+    }));
+    sendJson(res, 200, { servers: masked });
+    return;
+  }
+
+  // POST /api/servers - Add a server
+  if (req.method === 'POST' && pathname === '/api/servers') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', async () => {
+      try {
+        const { name, url, apiKey } = JSON.parse(body);
+        if (!name || !url || !apiKey) {
+          return sendJson(res, 400, { error: 'name, url, and apiKey required' });
+        }
+        const servers = loadServers();
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        if (servers.find(s => s.id === id)) {
+          return sendJson(res, 400, { error: 'Server with this name already exists' });
+        }
+        
+        // Generate ECDH key pair for encrypted communication
+        const keyPair = generateEcdhKeyPair();
+        
+        // Perform handshake with agent
+        let sharedSecret = null;
+        let encrypted = false;
+        try {
+          const handshakeRes = await fetch(url + '/handshake', {
+            method: 'POST',
+            headers: { 
+              'X-API-Key': apiKey,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+              clientId: id, 
+              publicKey: keyPair.publicKey,
+            }),
+            signal: AbortSignal.timeout(10000),
+          });
+          
+          if (handshakeRes.ok) {
+            const handshakeData = await handshakeRes.json();
+            if (handshakeData.publicKey) {
+              sharedSecret = deriveSharedSecret(keyPair.privateKey, handshakeData.publicKey);
+              encrypted = true;
+              console.log(`🔐 Encrypted connection established with server: ${name}`);
+            }
+          }
+        } catch (e) {
+          // Handshake failed - agent may not support encryption, continue without it
+          console.log(`⚠️ Handshake failed for ${name}, using unencrypted: ${e.message}`);
+        }
+        
+        const serverEntry = { 
+          id, 
+          name, 
+          url, 
+          apiKey, 
+          type: 'remote',
+          encrypted,
+        };
+        
+        // Store shared secret (base64 encoded) if encryption is enabled
+        if (sharedSecret) {
+          serverEntry.sharedSecret = sharedSecret.toString('base64');
+          serverEntry.clientId = id;
+        }
+        
+        servers.push(serverEntry);
+        saveServers(servers);
+        sendJson(res, 200, { status: 'success', id, encrypted });
+      } catch (e) {
+        sendJson(res, 400, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // PUT /api/servers/:id - Update a server
+  if (req.method === 'PUT' && pathname.startsWith('/api/servers/')) {
+    const id = pathname.split('/')[3];
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const updates = JSON.parse(body);
+        const servers = loadServers();
+        const idx = servers.findIndex(s => s.id === id);
+        if (idx === -1) return sendJson(res, 404, { error: 'Server not found' });
+        if (id === 'local') return sendJson(res, 400, { error: 'Cannot modify local server' });
+        servers[idx] = { ...servers[idx], ...updates, id }; // Don't allow id change
+        saveServers(servers);
+        sendJson(res, 200, { status: 'success' });
+      } catch (e) {
+        sendJson(res, 400, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // DELETE /api/servers/:id - Delete a server
+  if (req.method === 'DELETE' && pathname.startsWith('/api/servers/')) {
+    const id = pathname.split('/')[3];
+    if (id === 'local') return sendJson(res, 400, { error: 'Cannot delete local server' });
+    const servers = loadServers();
+    const filtered = servers.filter(s => s.id !== id);
+    if (filtered.length === servers.length) {
+      return sendJson(res, 404, { error: 'Server not found' });
+    }
+    saveServers(filtered);
+    sendJson(res, 200, { status: 'success' });
+    return;
+  }
+
+  // POST /api/servers/:id/test - Test connection to a server
+  if (req.method === 'POST' && pathname.match(/^\/api\/servers\/[^/]+\/test$/)) {
+    const id = pathname.split('/')[3];
+    const servers = loadServers();
+    const server = servers.find(s => s.id === id);
+    if (!server) return sendJson(res, 404, { error: 'Server not found' });
+    if (server.type === 'local') {
+      return sendJson(res, 200, { status: 'ok', message: 'Local server' });
+    }
+    // Test remote connection
+    fetch(server.url + '/health', {
+      headers: { 'X-API-Key': server.apiKey },
+      signal: AbortSignal.timeout(5000),
+    })
+      .then(r => r.json())
+      .then(data => sendJson(res, 200, { 
+        status: 'ok', 
+        serverName: data.serverName,
+        agentEncryption: data.encrypted || false,
+        localEncryption: server.encrypted || false,
+      }))
+      .catch(e => sendJson(res, 200, { status: 'error', message: e.message }));
+    return;
+  }
+
+  // POST /api/servers/:id/handshake - Re-establish encryption with a server
+  if (req.method === 'POST' && pathname.match(/^\/api\/servers\/[^/]+\/handshake$/)) {
+    const id = pathname.split('/')[3];
+    const servers = loadServers();
+    const serverIdx = servers.findIndex(s => s.id === id);
+    if (serverIdx === -1) return sendJson(res, 404, { error: 'Server not found' });
+    const server = servers[serverIdx];
+    if (server.type === 'local') {
+      return sendJson(res, 400, { error: 'Local server does not need handshake' });
+    }
+
+    (async () => {
+      try {
+        // Generate new key pair
+        const keyPair = generateEcdhKeyPair();
+        
+        const handshakeRes = await fetch(server.url + '/handshake', {
+          method: 'POST',
+          headers: { 
+            'X-API-Key': server.apiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ 
+            clientId: id, 
+            publicKey: keyPair.publicKey,
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        
+        if (!handshakeRes.ok) {
+          const err = await handshakeRes.json().catch(() => ({ error: 'HTTP ' + handshakeRes.status }));
+          return sendJson(res, 500, { error: err.error || 'Handshake failed' });
+        }
+        
+        const handshakeData = await handshakeRes.json();
+        if (!handshakeData.publicKey) {
+          return sendJson(res, 500, { error: 'Agent did not return public key' });
+        }
+        
+        const sharedSecret = deriveSharedSecret(keyPair.privateKey, handshakeData.publicKey);
+        
+        // Update server config
+        servers[serverIdx].encrypted = true;
+        servers[serverIdx].sharedSecret = sharedSecret.toString('base64');
+        servers[serverIdx].clientId = id;
+        saveServers(servers);
+        
+        console.log(`🔐 Re-established encrypted connection with server: ${server.name}`);
+        sendJson(res, 200, { status: 'ok', encrypted: true });
+      } catch (e) {
+        sendJson(res, 500, { error: e.message });
+      }
+    })();
+    return;
+  }
+
+  // GET /api/servers/:id/stats - Fetch stats from a remote server
+  if (req.method === 'GET' && pathname.match(/^\/api\/servers\/[^/]+\/stats$/)) {
+    const id = pathname.split('/')[3];
+    const servers = loadServers();
+    const server = servers.find(s => s.id === id);
+    if (!server) return sendJson(res, 404, { error: 'Server not found' });
+    if (server.type === 'local') {
+      return sendJson(res, 400, { error: 'Use /api/stats/stream for local' });
+    }
+    
+    // Build headers - include client ID if we have encryption set up
+    const headers = { 'X-API-Key': server.apiKey };
+    if (server.encrypted && server.clientId) {
+      headers['X-Client-ID'] = server.clientId;
+    }
+    
+    // Fetch from remote agent
+    fetch(server.url + '/stats', {
+      headers,
+      signal: AbortSignal.timeout(10000),
+    })
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(data => {
+        // Decrypt if response is encrypted
+        if (data.encrypted && server.sharedSecret) {
+          try {
+            const keyBuffer = Buffer.from(server.sharedSecret, 'base64');
+            const decrypted = decryptPayload(data.encrypted, keyBuffer);
+            decrypted._remote = true;
+            decrypted._encrypted = true;
+            return sendJson(res, 200, decrypted);
+          } catch (e) {
+            console.error('Decryption failed:', e.message);
+            return sendJson(res, 500, { error: 'Decryption failed: ' + e.message });
+          }
+        }
+        // Plain response (backward compatible)
+        data._remote = true;
+        sendJson(res, 200, data);
+      })
+      .catch(e => sendJson(res, 500, { error: e.message }));
     return;
   }
 
@@ -2072,9 +2457,16 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, loadedPages.filter(p => p.nav !== false).map(p => ({ id: p.id, title: p.title, icon: p.icon, description: p.description, order: p.order })));
       return;
     }
+    if (pageMatch.type === 'redirect') {
+      res.writeHead(302, { Location: pageMatch.location });
+      res.end();
+      return;
+    }
     if (pageMatch.type === 'static') {
       const resolved = path.resolve(pageMatch.filePath);
-      if (!resolved.startsWith(path.resolve(PAGES_DIR))) {
+      // Security: ensure path is within one of the allowed page directories
+      const isAllowed = PAGES_DIRS.some(dir => resolved.startsWith(path.resolve(dir)));
+      if (!isAllowed) {
         sendResponse(res, 403, 'text/plain', 'Forbidden');
         return;
       }
@@ -2115,7 +2507,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET/POST /api/todos - Read/write todo list
   if (pathname === '/api/todos') {
-    const todosFile = path.join(__dirname, 'todos.json');
+    const todosFile = path.join(CWD, 'todos.json');
     if (req.method === 'GET') {
       fs.readFile(todosFile, 'utf8', (err, data) => {
         if (err) {
@@ -2151,7 +2543,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET/POST /api/notes - Read/write notes content
   if (pathname === '/api/notes') {
-    const notesFile = path.join(__dirname, 'notes.json');
+    const notesFile = path.join(CWD, 'notes.json');
     if (req.method === 'GET') {
       fs.readFile(notesFile, 'utf8', (err, data) => {
         if (err) {
@@ -2357,20 +2749,26 @@ const server = http.createServer(async (req, res) => {
       try {
         let currentVersion = 'unknown';
         try {
-          // Use process.execPath to find the node binary's lib directory
-          const nodeDir = path.dirname(path.dirname(process.execPath)); // e.g. /Users/x/.nvm/versions/node/v24.13.0
-          const candidates = [
-            path.join(nodeDir, 'lib/node_modules/openclaw/package.json'),
-            path.join(os.homedir(), '.nvm/versions/node', process.version, 'lib/node_modules/openclaw/package.json'),
-            '/usr/local/lib/node_modules/openclaw/package.json'
-          ];
-          for (const cand of candidates) {
-            try {
-              currentVersion = JSON.parse(fs.readFileSync(cand, 'utf8')).version;
-              break;
-            } catch (_) {}
-          }
-        } catch (_) {}
+          // Run openclaw --version to get the actual running version
+          const { execSync } = require('child_process');
+          currentVersion = execSync('openclaw --version 2>/dev/null', { encoding: 'utf8', timeout: 5000 }).trim();
+        } catch (_) {
+          // Fallback: try reading from package.json
+          try {
+            const nodeDir = path.dirname(path.dirname(process.execPath));
+            const candidates = [
+              path.join(nodeDir, 'lib/node_modules/openclaw/package.json'),
+              path.join(os.homedir(), '.nvm/versions/node', process.version, 'lib/node_modules/openclaw/package.json'),
+              '/usr/local/lib/node_modules/openclaw/package.json'
+            ];
+            for (const cand of candidates) {
+              try {
+                currentVersion = JSON.parse(fs.readFileSync(cand, 'utf8')).version;
+                break;
+              } catch (_) {}
+            }
+          } catch (_) {}
+        }
 
         const ghRes = await fetch('https://api.github.com/repos/openclaw/openclaw/releases/latest');
         const ghData = await ghRes.json();
@@ -3138,6 +3536,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Serve static files
+  // Check working directory's public/ folder first (for user assets like recap images)
+  const publicPath = path.join(CWD, 'public', pathname);
+  const publicResolved = path.resolve(publicPath);
+  if (publicResolved.startsWith(path.join(CWD, 'public') + path.sep) && fs.existsSync(publicPath)) {
+    const ext = path.extname(publicPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    fs.readFile(publicPath, (err, data) => {
+      if (err) { sendError(res, err.message); return; }
+      sendResponse(res, 200, contentType, data);
+    });
+    return;
+  }
+
   let filePath = path.join(__dirname, pathname);
   if (pathname === '/') {
     filePath = path.join(__dirname, 'app.html');
