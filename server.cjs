@@ -1282,6 +1282,42 @@ async function fetchCursorUsage() {
   }
 }
 
+// Refresh Gemini CLI OAuth token.
+// These client credentials are intentionally public — gemini-cli is an installed
+// application and Google's own guidance permits embedding them in the source:
+// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/code_assist/oauth2.ts
+const GEMINI_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
+const GEMINI_CLIENT_SECRET = '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';
+
+async function refreshGeminiToken(credsPath, creds) {
+  if (!creds.refresh_token) return { error: 'No refresh token available.' };
+  try {
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: creds.refresh_token,
+        client_id: GEMINI_CLIENT_ID,
+        client_secret: GEMINI_CLIENT_SECRET,
+      }),
+    });
+    if (!resp.ok) return { error: 'Refresh failed (HTTP ' + resp.status + ')' };
+    const data = await resp.json();
+    const updated = {
+      ...creds,
+      access_token: data.access_token,
+      expiry_date: Date.now() + (data.expires_in * 1000),
+    };
+    if (data.refresh_token) updated.refresh_token = data.refresh_token;
+    if (data.id_token) updated.id_token = data.id_token;
+    try { fs.writeFileSync(credsPath, JSON.stringify(updated, null, 2)); } catch (_) {}
+    return { accessToken: data.access_token, creds: updated };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 // Fetch Gemini usage
 async function fetchGeminiUsage() {
   const baseInfo = {
@@ -1289,34 +1325,53 @@ async function fetchGeminiUsage() {
     name: AI_PROVIDERS.gemini.name,
     icon: AI_PROVIDERS.gemini.icon,
   };
-  
+
   const credsPath = AI_PROVIDERS.gemini.credPaths[0];
   if (!fs.existsSync(credsPath)) {
     return { ...baseInfo, error: 'Not logged in. Run `gemini auth` first.' };
   }
-  
+
   let creds;
   try {
     creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
   } catch (e) {
     return { ...baseInfo, error: 'Invalid credentials file.' };
   }
-  
-  if (!creds.access_token) {
+
+  if (!creds.access_token && !creds.refresh_token) {
     return { ...baseInfo, error: 'No access token found.' };
   }
-  
+
+  // Proactively refresh if the token is expired or expires within 5 minutes.
+  // This handles the case where gemini-cli on another machine has rotated the
+  // shared OAuth token, leaving the stored access_token stale.
+  const FIVE_MINUTES = 5 * 60 * 1000;
+  if (!creds.access_token || (creds.expiry_date && Date.now() >= creds.expiry_date - FIVE_MINUTES)) {
+    const refreshed = await refreshGeminiToken(credsPath, creds);
+    if (refreshed.error) return { ...baseInfo, error: 'Session expired. Run `gemini auth` to re-auth.' };
+    creds = refreshed.creds;
+  }
+
+  const callQuotaApi = (token) => fetch('https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: '{}',
+  });
+
   try {
-    // Get user quota
-    const resp = await fetch('https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${creds.access_token}`,
-        'Content-Type': 'application/json',
-      },
-      body: '{}',
-    });
-    
+    let resp = await callQuotaApi(creds.access_token);
+
+    // On auth failure, attempt a token refresh and retry once before giving up.
+    if (resp.status === 401 || resp.status === 403) {
+      const refreshed = await refreshGeminiToken(credsPath, creds);
+      if (refreshed.error) return { ...baseInfo, error: 'Session expired. Run `gemini auth` to re-auth.' };
+      creds = refreshed.creds;
+      resp = await callQuotaApi(creds.access_token);
+    }
+
     if (!resp.ok) {
       if (resp.status === 401 || resp.status === 403) {
         return { ...baseInfo, error: 'Session expired. Run `gemini auth` to re-auth.' };
@@ -1330,16 +1385,16 @@ async function fetchGeminiUsage() {
     // Parse quota buckets (API returns 'buckets' with 'remainingFraction')
     const buckets = data.buckets || data.quotaBuckets || [];
     
-    // Filter for interesting models and REQUESTS type
-    const interestingModels = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+    // Track all non-Vertex Gemini request buckets instead of a hardcoded
+    // 2.x allowlist so new Gemini CLI quota windows surface automatically.
     const seen = new Set();
     
     for (const bucket of buckets) {
       if (bucket.tokenType !== 'REQUESTS') continue;
       // Skip vertex variants
       if (bucket.modelId?.includes('_vertex')) continue;
-      // Only show interesting models
-      if (!interestingModels.some(m => bucket.modelId?.startsWith(m))) continue;
+      // Only show Gemini model buckets
+      if (!bucket.modelId?.startsWith('gemini-')) continue;
       // Dedupe
       if (seen.has(bucket.modelId)) continue;
       seen.add(bucket.modelId);
@@ -1354,6 +1409,8 @@ async function fetchGeminiUsage() {
       });
     }
     
+    metrics.sort((a, b) => String(a.label || '').localeCompare(String(b.label || '')));
+
     return {
       ...baseInfo,
       plan: 'Gemini CLI',
@@ -2751,7 +2808,10 @@ const server = http.createServer(async (req, res) => {
         try {
           // Run openclaw --version to get the actual running version
           const { execSync } = require('child_process');
-          currentVersion = execSync('openclaw --version 2>/dev/null', { encoding: 'utf8', timeout: 5000 }).trim();
+          const cliOutput = execSync('openclaw --version 2>/dev/null', { encoding: 'utf8', timeout: 5000 }).trim();
+          // Output format: "OpenClaw 2026.3.23-2 (hash)" — extract just the version
+          const vMatch = cliOutput.match(/(\d{4}\.\d+\.\d+(?:-\d+)?)/);
+          currentVersion = vMatch ? vMatch[1] : cliOutput;
         } catch (_) {
           // Fallback: try reading from package.json
           try {
